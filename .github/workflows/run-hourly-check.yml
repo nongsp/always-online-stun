@@ -19,10 +19,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Enable Cargo cache
         uses: actions/cache@v3
@@ -38,11 +36,9 @@ jobs:
       - name: Build project
         run: cargo build --release
 
-      - name: Test IPv4 connectivity
-        run: ping -4 -c 4 google.com
-
-      - name: Test IPv6 connectivity (optional)
-        run: ping -6 -c 4 google.com || true
+      - name: Test network connectivity
+        run: |
+          curl -I https://google.com || true
 
       - name: Run STUN detection
         run: cargo run --release
@@ -51,9 +47,7 @@ jobs:
         id: timestamp
         run: echo "timestamp=$(date -u)" >> $GITHUB_OUTPUT
 
-      - name: Commit and push results
+      - name: Commit results
         uses: stefanzweifel/git-auto-commit-action@v4
         with:
           commit_message: STUN check ${{ steps.timestamp.outputs.timestamp }}
-          commit_user_name: github-actions
-          commit_user_email: github-actions@github.com
