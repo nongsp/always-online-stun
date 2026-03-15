@@ -1,88 +1,130 @@
 use tokio::net::UdpSocket;
+use tokio::time::{timeout, Duration};
+
+use futures::stream::{self, StreamExt};
+
+use rand::Rng;
+
+use serde::Serialize;
+
 use std::net::SocketAddr;
-use std::time::Duration;
+
+const CONCURRENCY: usize = 100;
+const TIMEOUT: u64 = 3;
 
 const STUN_SERVERS: &[&str] = &[
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-    "stun2.l.google.com:19302",
-    "stun3.l.google.com:19302",
-    "stun4.l.google.com:19302",
-    "stun.cloudflare.com:3478",
+"stun.l.google.com:19302",
+"stun1.l.google.com:19302",
+"stun2.l.google.com:19302",
+"stun3.l.google.com:19302",
+"stun4.l.google.com:19302",
+"stun.cloudflare.com:3478",
+"stun.nextcloud.com:443",
+"stun.sipgate.net:3478",
+"stun.callwithus.com:3478",
+"stun.counterpath.net:3478",
+"stun.ekiga.net:3478",
+"stun.voipbuster.com:3478",
+"stun.voipstunt.com:3478",
+"stun.voxgratia.org:3478",
+"stun.services.mozilla.com:3478",
+"stun.sipgate.net:10000",
+"stun.syncthing.net:3478",
+"stun.miwifi.com:3478",
+"stun.qq.com:3478",
+"stunserver.stunprotocol.org:3478",
 ];
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
-    println!("Starting STUN availability scan...");
-
-    let mut valid_servers = Vec::new();
-
-    for server in STUN_SERVERS {
-
-        let addr: SocketAddr = match server.parse() {
-            Ok(v) => v,
-            Err(_) => {
-                println!("Invalid address {}", server);
-                continue;
-            }
-        };
-
-        match test_stun(addr).await {
-
-            Ok(mapped_ip) => {
-                println!("OK {} -> {}", server, mapped_ip);
-                valid_servers.push(server.to_string());
-            }
-
-            Err(e) => {
-                println!("FAIL {} ({})", server, e);
-            }
-
-        }
-    }
-
-    println!("Valid STUN servers: {}", valid_servers.len());
-
-    let output = valid_servers.join("\n");
-
-    std::fs::write("stun_servers.txt", output)?;
-
-    println!("Saved stun_servers.txt");
-
-    Ok(())
+#[derive(Serialize)]
+struct StunResult {
+    server: String,
+    mapped: String,
 }
 
-async fn test_stun(server: SocketAddr) -> Result<String, Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() {
 
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    println!("STUN concurrent scanner starting...");
+    println!("servers: {}", STUN_SERVERS.len());
+    println!("concurrency: {}", CONCURRENCY);
 
-    socket.connect(server).await?;
+    let results: Vec<_> = stream::iter(STUN_SERVERS)
+        .map(|server| async move {
 
-    let binding_request = build_stun_request();
+            match scan_server(server).await {
 
-    socket.send(&binding_request).await?;
+                Some(mapped) => {
+
+                    println!("OK {} -> {}", server, mapped);
+
+                    Some(StunResult {
+                        server: server.to_string(),
+                        mapped,
+                    })
+                }
+
+                None => {
+
+                    println!("FAIL {}", server);
+
+                    None
+                }
+            }
+        })
+        .buffer_unordered(CONCURRENCY)
+        .collect()
+        .await;
+
+    let valid: Vec<StunResult> =
+        results.into_iter().flatten().collect();
+
+    println!("valid servers: {}", valid.len());
+
+    let txt = valid
+        .iter()
+        .map(|v| v.server.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    std::fs::write("stun_servers.txt", txt).unwrap();
+
+    let json = serde_json::to_string_pretty(&valid).unwrap();
+
+    std::fs::write("stun_servers.json", json).unwrap();
+
+    println!("files generated:");
+    println!("stun_servers.txt");
+    println!("stun_servers.json");
+}
+
+async fn scan_server(server: &str) -> Option<String> {
+
+    let addr: SocketAddr = server.parse().ok()?;
+
+    let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+
+    socket.connect(addr).await.ok()?;
+
+    let req = build_stun_request();
+
+    socket.send(&req).await.ok()?;
 
     let mut buf = [0u8; 1024];
 
-    let timeout = tokio::time::timeout(
-        Duration::from_secs(3),
+    let res = timeout(
+        Duration::from_secs(TIMEOUT),
         socket.recv(&mut buf)
-    ).await;
+    )
+    .await;
 
-    match timeout {
+    let size = match res {
 
-        Ok(Ok(size)) => {
+        Ok(Ok(n)) => n,
 
-            let mapped = parse_xor_mapped_address(&buf[..size])?;
+        _ => return None,
+    };
 
-            Ok(mapped)
-        }
-
-        _ => Err("timeout".into())
-
-    }
-
+    parse_stun(&buf[..size])
 }
 
 fn build_stun_request() -> Vec<u8> {
@@ -97,45 +139,56 @@ fn build_stun_request() -> Vec<u8> {
     msg[6] = 0xA4;
     msg[7] = 0x42;
 
+    let mut rng = rand::thread_rng();
+
     for i in 8..20 {
-        msg[i] = rand::random();
+        msg[i] = rng.gen();
     }
 
     msg
 }
 
-fn parse_xor_mapped_address(data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+fn parse_stun(data: &[u8]) -> Option<String> {
 
     if data.len() < 20 {
-        return Err("invalid stun response".into());
+        return None;
     }
+
+    let cookie = [0x21,0x12,0xA4,0x42];
 
     let mut i = 20;
 
-    while i + 4 < data.len() {
+    while i + 4 <= data.len() {
 
-        let attr_type = u16::from_be_bytes([data[i], data[i + 1]]);
-        let attr_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        let t = u16::from_be_bytes([data[i],data[i+1]]);
+        let l = u16::from_be_bytes([data[i+2],data[i+3]]) as usize;
 
-        if attr_type == 0x0020 {
+        if i + 4 + l > data.len() {
+            break;
+        }
 
-            let port = u16::from_be_bytes([data[i + 6], data[i + 7]]) ^ 0x2112;
+        let v = &data[i+4..i+4+l];
+
+        if t == 0x0020 && l >= 8 {
+
+            let port =
+                u16::from_be_bytes([v[2],v[3]]) ^ 0x2112;
 
             let ip = [
-                data[i + 8] ^ 0x21,
-                data[i + 9] ^ 0x12,
-                data[i + 10] ^ 0xA4,
-                data[i + 11] ^ 0x42,
+                v[4]^cookie[0],
+                v[5]^cookie[1],
+                v[6]^cookie[2],
+                v[7]^cookie[3],
             ];
 
-            return Ok(format!(
+            return Some(format!(
                 "{}.{}.{}.{}:{}",
-                ip[0], ip[1], ip[2], ip[3], port
+                ip[0],ip[1],ip[2],ip[3],port
             ));
         }
 
-        i += 4 + attr_len;
+        i += 4 + ((l + 3) & !3);
     }
 
-    Err("no mapped address".into())
+    None
 }
