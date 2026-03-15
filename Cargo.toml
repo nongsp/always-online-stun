@@ -6,13 +6,5 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-trait = { version = "0.1.83", default-features = false }
-futures = { version = "0.3.31" }
-log = { version = "0.4.22" }
-pretty_env_logger = { version = "0.5.0" }
-rand = { version = "0.8.5", default-features = true }
-reqwest = { version = "0.12.9", default-features = false, features = ["json", "rustls-tls"] }
-serde_json = { version = "1.0.133", default-features = false }
-stun-format = { version = "1.0.1", features = ["fmt"] }
-tokio = { version = "1.41.1", default-features = false, features = ["fs", "macros", "net", "rt"] }
-tokio-stream = { version = "0.1.16", default-features = false }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
